@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<body>
+<div style="margin: 20px">
+    <label for="loginAccount">登录账号</label><input id="loginAccount" name="loginAccount" placeholder="请输入手机号"
+                                                     type="text">
+    <button id="login" onclick="login()" type="button">登录</button>
+</div>
+<div style="margin: 20px">
+    <video autoplay controls height="360px" id="localVideo" width="640px"></video>
+    <video autoplay controls height="360px" id="remoteVideo" width="640px"></video>
+</div>
+
+<div style="margin: 20px">
+    <label for="toAccount">对方账号</label>
+    <input id="toAccount" name="toAccount" placeholder="请输入对方手机号" type="text">
+    <button id="requestVideo" onclick="requestVideo()" type="button">请求视频通话</button>
+</div>
+
+<div style="margin: 20px">
+    <fieldset>
+        <button id="accept" type="button">接通</button>
+        <button id="hangup" type="button">挂断</button>
+    </fieldset>
+</div>
+
+<div style="margin: 20px">
+    <fieldset>
+        <div>
+            录制格式： <select disabled id="codecPreferences"></select>
+        </div>
+        <button id="startRecord" onclick="startRecording()" type="button">开始录制视频</button>
+        <button id="stopRecord" onclick="stopRecording()" type="button">停止录制视频</button>
+        <button id="downloadRecord" onclick="download()" type="button">下载</button>
+    </fieldset>
+</div>
+
+</body>
+
+<script>
+    let config = {
+        iceServers: [
+            {
+                'urls': 'turn:turn.wildfirechat.cn:3478',
+                'credential': 'wfchat',
+                'username': 'wfchat'
+            }
+        ]
+    }
+
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+
+    const requestVideoButton = document.getElementById('requestVideo');
+    const acceptButton = document.getElementById('accept');
+    const hangupButton = document.getElementById('hangup');
+
+    const codecPreferences = document.querySelector('#codecPreferences');
+
+    const recordButton = document.getElementById('startRecord')
+    const stopRecordButton = document.getElementById('stopRecord')
+    const downloadButton = document.getElementById('downloadRecord')
+
+    const wsAddress = 'ws://localhost:9113/ws';
+    let loginAttemptCount = 0;
+    let myId, toId;
+    let pc, localStream, ws;
+
+    let mediaRecorder;
+    let recordedBlobs;
+
+    function login() {
+        loginAttemptCount = 0;
+
+        myId = document.getElementById('loginAccount').value;
+
+        ws = new WebSocket(wsAddress);
+        ws.onopen = function () {
+            console.log("WebSocket is open now.");
+            connect();
+            alert("登录成功");
+        };
+
+        ws.onmessage = function (message) {
+            let msg = JSON.parse(message.data);
+            console.log("ws 收到消息：" + msg.type);
+            switch (msg.type) {
+                case "offline": {
+                    if (loginAttemptCount < 10) {
+                        setTimeout(() => {
+                            loginAttemptCount++;
+                            watch();
+                        }, 1000);
+                    }
+                    break;
+                }
+                case "watch": {
+                    handleWatch(msg);
+                    break;
+                }
+                case "offer": {
+                    handleOffer(msg);
+                    break;
+                }
+                case "answer": {
+                    handleAnswer(msg);
+                    break;
+                }
+                case "candidate": {
+                    handleCandidate(msg);
+                    break;
+                }
+                case "hangup": {
+                    handleHangup(msg);
+                    break;
+                }
+            }
+        };
+    }
+
+    requestVideoButton.onclick = async () => {
+        toId = document.getElementById('toAccount').value;
+
+        if (!myId) {
+            alert('请先登录');
+            return;
+        }
+
+        if (!toId) {
+            alert('请输入对方手机号');
+            return;
+        }
+
+        watch();
+
+        localStream = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
+        localVideo.srcObject = localStream;
+
+        createPeerConnection();
+    }
+
+    function connect() {
+        send({
+            type: "connect",
+            from: myId
+        });
+    }
+
+
+    function handleWatch(msg) {
+        toId = msg.from;
+    }
+
+    acceptButton.onclick = async () => {
+        localStream = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
+        localVideo.srcObject = localStream;
+        createPeerConnection();
+
+        pc.createOffer().then(offer => {
+            pc.setLocalDescription(offer);
+            send({
+                type: 'offer',
+                from: myId,
+                to: toId,
+                data: offer
+            });
+        });
+    }
+
+    function handleOffer(msg) {
+        pc.setRemoteDescription(msg.data);
+
+        pc.createAnswer().then(answer => {
+            pc.setLocalDescription(answer);
+            send({
+                type: "answer",
+                from: myId,
+                to: toId,
+                data: answer
+            });
+        });
+    }
+
+    function watch() {
+        send({
+            type: 'watch',
+            from: myId,
+            to: toId
+        });
+    }
+
+    function handleAnswer(msg) {
+        if (!pc) {
+            console.error('no peer connection');
+            return;
+        }
+        pc.setRemoteDescription(msg.data);
+    }
+
+    function handleCandidate(msg) {
+        if (!pc) {
+            console.error('no peer connection');
+            return;
+        }
+        pc.addIceCandidate(new RTCIceCandidate(msg.data)).then(() => {
+            console.log('candidate添加成功')
+        }).catch(handleError)
+    }
+
+    function handleError(error) {
+        console.log(error);
+    }
+
+    function createPeerConnection() {
+        pc = new RTCPeerConnection(config);
+        pc.onicecandidate = e => {
+            if (e.candidate) {
+                send({
+                    type: "candidate",
+                    from: myId,
+                    to: toId,
+                    data: e.candidate
+                });
+            }
+        };
+
+        pc.ontrack = e => remoteVideo.srcObject = e.streams[0];
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+    }
+
+    hangupButton.onclick = async () => {
+        if (pc) {
+            pc.close();
+            pc = null;
+        }
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+            localStream = null;
+        }
+        send({
+            type: "hangup",
+            from: myId,
+            to: toId
+        });
+    }
+
+    function handleHangup() {
+        if (!pc) {
+            console.error('no peer connection');
+            return;
+        }
+        pc.close();
+        pc = null;
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+            localStream = null;
+        }
+        console.log('hangup');
+    }
+
+    function send(msg) {
+        ws.send(JSON.stringify(msg));
+    }
+
+    function getSupportedMimeTypes() {
+        const possibleTypes = [
+            'video/webm;codecs=vp9,opus',
+            'video/webm;codecs=vp8,opus',
+            'video/webm;codecs=h264,opus',
+            'video/mp4;codecs=h264,aac',
+        ];
+        return possibleTypes.filter(mimeType => {
+            return MediaRecorder.isTypeSupported(mimeType);
+        });
+    }
+
+    function startRecording() {
+        recordedBlobs = [];
+        getSupportedMimeTypes().forEach(mimeType => {
+            const option = document.createElement('option');
+            option.value = mimeType;
+            option.innerText = option.value;
+            codecPreferences.appendChild(option);
+        });
+        const mimeType = codecPreferences.options[codecPreferences.selectedIndex].value;
+        const options = {mimeType};
+
+        try {
+            mediaRecorder = new MediaRecorder(remoteVideo.srcObject, options);
+        } catch (e) {
+            console.error('Exception while creating MediaRecorder:', e);
+            alert('Exception while creating MediaRecorder: ' + e);
+            return;
+        }
+
+        console.log('Created MediaRecorder', mediaRecorder, 'with options', options);
+        recordButton.textContent = 'Stop Recording';
+        mediaRecorder.onstop = (event) => {
+            console.log('Recorder stopped: ', event);
+            console.log('Recorded Blobs: ', recordedBlobs);
+        };
+        mediaRecorder.ondataavailable = handleDataAvailable;
+        mediaRecorder.start();
+        console.log('MediaRecorder started', mediaRecorder);
+    }
+
+    function handleDataAvailable(event) {
+        console.log('handleDataAvailable', event);
+        if (event.data && event.data.size > 0) {
+            recordedBlobs.push(event.data);
+        }
+    }
+
+    function stopRecording() {
+        mediaRecorder.stop();
+    }
+
+    function download() {
+        const blob = new Blob(recordedBlobs, {type: 'video/webm'});
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = 'test.webm';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        }, 100);
+    }
+
+
+</script>
+</html>
